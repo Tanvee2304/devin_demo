@@ -16,34 +16,41 @@
 
 # Standard Library
 import logging
-from xml.sax.saxutils import escape
 
 # Django
+from django.contrib.auth.decorators import login_required
+from django.forms import model_to_dict
 from django.http import (
     HttpResponse,
     HttpResponseForbidden,
+    HttpResponseRedirect,
 )
 from django.shortcuts import get_object_or_404
+from django.urls import reverse
 from django.utils.translation import gettext as _
 
 # Third Party
-from reportlab.lib.pagesizes import (
-    A4,
-    landscape,
-)
+from reportlab.lib import colors
+from reportlab.lib.pagesizes import A4
 from reportlab.lib.units import cm
 from reportlab.platypus import (
     Paragraph,
     SimpleDocTemplate,
     Spacer,
+    Table,
 )
 
 # wger
-from wger.manager.helpers import render_workout_day
-from wger.manager.models import Routine
+from wger.nutrition.models import (
+    Meal,
+    MealItem,
+    NutritionPlan,
+)
 from wger.utils.pdf import (
     get_logo,
+    header_colour,
     render_footer,
+    row_color,
     styleSheet,
 )
 
@@ -51,86 +58,65 @@ from wger.utils.pdf import (
 logger = logging.getLogger(__name__)
 
 
-def workout_log(request, pk: int):
+# ************************
+# Plan functions
+# ************************
+
+
+@login_required
+def copy(request, pk):
     """
-    Generates a PDF with the contents of the given routine
+    Copy the nutrition plan
     """
+    orig_plan = get_object_or_404(NutritionPlan, pk=pk, user=request.user)
 
-    # Load the workout
-    if request.user.is_anonymous:
-        return HttpResponseForbidden()
-    routine = get_object_or_404(Routine, pk=pk, user=request.user)
+    # Convert the original plan to a dictionary and remove the primary key
+    # so the copy gets a fresh UUID.
+    plan_data = model_to_dict(orig_plan)
+    plan_data.pop('id', None)
 
-    # Create the HttpResponse object with the appropriate PDF headers.
-    response = HttpResponse(content_type='application/pdf')
+    plan_copy = NutritionPlan.objects.create(user=request.user, **plan_data)
 
-    # Create the PDF object, using the response object as its "file."
-    doc = SimpleDocTemplate(
-        response,
-        pagesize=landscape(A4),
-        # pagesize = landscape(A4),
-        leftMargin=cm,
-        rightMargin=cm,
-        topMargin=0.5 * cm,
-        bottomMargin=0.5 * cm,
-        title=_('Workout'),
-        author='wger Workout Manager',
-        subject=_('Workout for %s') % request.user.username,
-    )
+    # Copy meals and meal items
+    orig_meals = orig_plan.meal_set.all()
+    for orig_meal in orig_meals:
+        meal_data = model_to_dict(orig_meal)
+        meal_data.pop('id', None)
+        meal_data['plan'] = plan_copy
+        # setting manually due to "editable" False
+        meal_data['order'] = orig_meal.order
 
-    # container for the 'Flowable' objects
-    elements = []
+        meal_copy = Meal.objects.create(**meal_data)
 
-    # Add site logo
-    elements.append(get_logo())
-    elements.append(Spacer(10 * cm, 0.5 * cm))
+        orig_meal_items = orig_meal.mealitem_set.all()
+        for orig_meal_item in orig_meal_items:
+            meal_item_data = model_to_dict(orig_meal_item)
+            meal_item_data.pop('id', None)
+            meal_item_data.pop('ingredient')
+            meal_item_data['meal'] = meal_copy
+            meal_item_data['ingredient_id'] = orig_meal_item.ingredient_id
+            # setting manually due to "editable" False
+            meal_item_data['order'] = orig_meal_item.order
+            MealItem.objects.create(**meal_item_data)
 
-    # Set the title
-    p = Paragraph(
-        f'<para align="center"><strong>{escape(routine.name)}</strong></para>',
-        styleSheet['HeaderBold'],
-    )
-    elements.append(p)
-    elements.append(Spacer(10 * cm, 0.5 * cm))
-    if routine.description:
-        p = Paragraph(f'<para align="center">{escape(routine.description)}</para>')
-        elements.append(p)
-        elements.append(Spacer(10 * cm, 1.5 * cm))
-
-    # Iterate through the Workout and render the training days
-    for day_data in routine.data_for_iteration():
-        if day_data.day is None:
-            continue
-        elements.append(render_workout_day(day_data))
-        elements.append(Spacer(10 * cm, 0.5 * cm))
-
-    # Footer, date and info
-    elements.append(Spacer(10 * cm, 0.5 * cm))
-    elements.append(render_footer(request.build_absolute_uri(routine.get_absolute_url())))
-
-    # write the document and send the response to the browser
-    doc.build(elements)
-
-    # Create the HttpResponse object with the appropriate PDF headers.
-    response['Content-Length'] = len(response.content)
-    return response
+    # Redirect
+    return HttpResponseRedirect(reverse('nutrition:plan:view', kwargs={'id': plan_copy.id}))
 
 
-def workout_view(request, pk):
+def export_pdf(request, id: int):
     """
-    Generates a PDF with the contents of the workout, without table for logs
-    """
-    """
-    Generates a PDF with the contents of the given workout
+    Generates a PDF with the contents of a nutrition plan
+
     See also
     * http://www.blog.pythonlibrary.org/2010/09/21/reportlab
     * http://www.reportlab.com/apis/reportlab/dev/platypus.html
     """
-
+    # Load the plan
     if request.user.is_anonymous:
         return HttpResponseForbidden()
+    plan = get_object_or_404(NutritionPlan, pk=id, user=request.user)
 
-    routine = get_object_or_404(Routine, pk=pk, user=request.user)
+    plan_data = plan.get_nutritional_values()
 
     # Create the HttpResponse object with the appropriate PDF headers.
     response = HttpResponse(content_type='application/pdf')
@@ -139,45 +125,199 @@ def workout_view(request, pk):
     doc = SimpleDocTemplate(
         response,
         pagesize=A4,
-        leftMargin=cm,
-        rightMargin=cm,
-        topMargin=0.5 * cm,
-        bottomMargin=0.5 * cm,
-        title=_('Workout'),
+        title=_('Nutritional plan'),
         author='wger Workout Manager',
-        subject=_('Workout for %s') % request.user.username,
+        subject=_('Nutritional plan for %s') % request.user.username,
+        topMargin=1 * cm,
     )
 
     # container for the 'Flowable' objects
     elements = []
+    data = []
+
+    # Iterate through the Plan
+    meal_markers = []
+    ingredient_markers = []
+
+    # Meals
+    i = 0
+    for meal in plan.meal_set.select_related():
+        i += 1
+
+        meal_markers.append(len(data))
+
+        if not meal.time:
+            p = Paragraph(
+                f'<para align="center"><strong>{_("Nr.")} {i}</strong></para>',
+                styleSheet['SubHeader'],
+            )
+        else:
+            p = Paragraph(
+                f'<para align="center"><strong>'
+                f'{_("Nr.")} {i} - {meal.time.strftime("%H:%M")}'
+                f'</strong></para>',
+                styleSheet['SubHeader'],
+            )
+        data.append([p])
+
+        # Ingredients
+        for item in meal.mealitem_set.select_related():
+            ingredient_markers.append(len(data))
+
+            p = Paragraph(f'<para>{item.ingredient.name}</para>', styleSheet['Normal'])
+            if item.weight_unit:
+                unit_name = ' × ' + item.weight_unit.name
+            else:
+                unit_name = 'g'
+
+            data.append(
+                [Paragraph('{0:.0f}{1}'.format(item.amount, unit_name), styleSheet['Normal']), p]
+            )
+
+        # Add filler
+        data.append([Spacer(1 * cm, 0.6 * cm)])
+
+    # Set general table styles
+    table_style = []
+
+    # Set specific styles, e.g. background for title cells
+    for marker in meal_markers:
+        # Set background colour for headings
+        table_style.append(('BACKGROUND', (0, marker), (-1, marker), header_colour))
+        table_style.append(('BOX', (0, marker), (-1, marker), 1.25, colors.black))
+
+        # Make the headings span the whole width
+        table_style.append(('SPAN', (0, marker), (-1, marker)))
+
+    # has the plan any data?
+    if data:
+        t = Table(data, style=table_style)
+
+        # Manually set the width of the columns
+        t._argW[0] = 3.5 * cm
+
+    # There is nothing to output
+    else:
+        t = Paragraph(
+            _('<i>This is an empty plan, what did you expect on the PDF?</i>'), styleSheet['Normal']
+        )
 
     # Add site logo
     elements.append(get_logo())
     elements.append(Spacer(10 * cm, 0.5 * cm))
 
-    # Set the title
-    p = Paragraph(
-        '<para align="center"><strong>%(description)s</strong></para>'
-        % {'description': escape(str(routine))},
-        styleSheet['HeaderBold'],
-    )
-    elements.append(p)
-    elements.append(Spacer(10 * cm, 1.5 * cm))
+    # Set the title (if available)
+    if plan.description:
+        p = Paragraph(
+            '<para align="center"><strong>%(description)s</strong></para>'
+            % {'description': plan.description},
+            styleSheet['HeaderBold'],
+        )
+        elements.append(p)
 
-    # Iterate through the Workout and render the training days
-    for day_data in routine.data_for_iteration():
-        if day_data.day is None:
-            continue
-        elements.append(render_workout_day(day_data, only_table=True))
-        elements.append(Spacer(10 * cm, 0.5 * cm))
+        # Filler
+        elements.append(Spacer(10 * cm, 1.5 * cm))
+
+    # append the table to the document
+    elements.append(t)
+    elements.append(Paragraph('<para>&nbsp;</para>', styleSheet['Normal']))
+
+    # Create table with nutritional calculations
+    data = []
+    data.append(
+        [
+            Paragraph(
+                f'<para align="center">{_("Nutritional data")}</para>',
+                styleSheet['SubHeaderBlack'],
+            )
+        ]
+    )
+    data.append(
+        [
+            Paragraph(_('Macronutrients'), styleSheet['Normal']),
+            Paragraph(_('Total'), styleSheet['Normal']),
+            Paragraph(_('Percent of energy'), styleSheet['Normal']),
+            Paragraph(_('g per body kg'), styleSheet['Normal']),
+        ]
+    )
+    data.append(
+        [
+            Paragraph(_('Energy'), styleSheet['Normal']),
+            Paragraph(str(plan_data['total'].energy), styleSheet['Normal']),
+        ]
+    )
+    data.append(
+        [
+            Paragraph(_('Protein'), styleSheet['Normal']),
+            Paragraph(str(plan_data['total'].protein), styleSheet['Normal']),
+            Paragraph(str(plan_data['percent']['protein']), styleSheet['Normal']),
+            Paragraph(str(plan_data['per_kg']['protein']), styleSheet['Normal']),
+        ]
+    )
+    data.append(
+        [
+            Paragraph(_('Carbohydrates'), styleSheet['Normal']),
+            Paragraph(str(plan_data['total'].carbohydrates), styleSheet['Normal']),
+            Paragraph(str(plan_data['percent']['carbohydrates']), styleSheet['Normal']),
+            Paragraph(str(plan_data['per_kg']['carbohydrates']), styleSheet['Normal']),
+        ]
+    )
+    data.append(
+        [
+            Paragraph('    ' + _('Sugar content in carbohydrates'), styleSheet['Normal']),
+            Paragraph(str(plan_data['total'].carbohydrates_sugar), styleSheet['Normal']),
+        ]
+    )
+    data.append(
+        [
+            Paragraph(_('Fat'), styleSheet['Normal']),
+            Paragraph(str(plan_data['total'].fat), styleSheet['Normal']),
+            Paragraph(str(plan_data['percent']['fat']), styleSheet['Normal']),
+            Paragraph(str(plan_data['per_kg']['fat']), styleSheet['Normal']),
+        ]
+    )
+    data.append(
+        [
+            Paragraph(_('Saturated fat content in fats'), styleSheet['Normal']),
+            Paragraph(str(plan_data['total'].fat_saturated), styleSheet['Normal']),
+        ]
+    )
+    data.append(
+        [
+            Paragraph(_('Fiber'), styleSheet['Normal']),
+            Paragraph(str(plan_data['total'].fiber), styleSheet['Normal']),
+        ]
+    )
+    data.append(
+        [
+            Paragraph(_('Sodium'), styleSheet['Normal']),
+            Paragraph(str(plan_data['total'].sodium), styleSheet['Normal']),
+        ]
+    )
+
+    table_style = []
+    table_style.append(('BOX', (0, 0), (-1, -1), 1.25, colors.black))
+    table_style.append(('GRID', (0, 0), (-1, -1), 0.40, colors.black))
+    table_style.append(('SPAN', (0, 0), (-1, 0)))  # Title
+    table_style.append(('SPAN', (1, 2), (-1, 2)))  # Energy
+    table_style.append(('BACKGROUND', (0, 3), (-1, 3), row_color))  # Protein
+    table_style.append(('BACKGROUND', (0, 4), (-1, 4), row_color))  # Carbohydrates
+    table_style.append(('SPAN', (1, 5), (-1, 5)))  # Sugar
+    table_style.append(('LEFTPADDING', (0, 5), (0, 5), 15))
+    table_style.append(('BACKGROUND', (0, 6), (-1, 6), row_color))  # Fats
+    table_style.append(('SPAN', (1, 7), (-1, 7)))  # Saturated fats
+    table_style.append(('LEFTPADDING', (0, 7), (0, 7), 15))
+    table_style.append(('SPAN', (1, 8), (-1, 8)))  # Fiber
+    table_style.append(('SPAN', (1, 9), (-1, 9)))  # Sodium
+    t = Table(data, style=table_style)
+    t._argW[0] = 6 * cm
+    elements.append(t)
 
     # Footer, date and info
     elements.append(Spacer(10 * cm, 0.5 * cm))
-    elements.append(render_footer(request.build_absolute_uri(routine.get_absolute_url())))
-
-    # write the document and send the response to the browser
+    elements.append(render_footer(request.build_absolute_uri(plan.get_absolute_url())))
     doc.build(elements)
 
-    # Create the HttpResponse object with the appropriate PDF headers.
+    response['Content-Disposition'] = 'attachment; filename=nutritional-plan.pdf'
     response['Content-Length'] = len(response.content)
     return response
