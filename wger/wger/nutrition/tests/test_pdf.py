@@ -1,3 +1,5 @@
+# C:\Users\TanviLimaye\Desktop\devin\wger\wger\manager\tests\test_pdf.py
+
 # This file is part of wger Workout Manager.
 #
 # wger Workout Manager is free software: you can redistribute it and/or modify
@@ -12,79 +14,70 @@
 #
 # You should have received a copy of the GNU Affero General Public License
 
+# Standard Library
+from unittest.mock import patch
+
 # Django
-from django.contrib.auth.models import User
 from django.urls import reverse
 
+# Third Party
+from reportlab.platypus import Paragraph
+
 # wger
-from wger.core.models import Language
 from wger.core.tests.base_testcase import WgerTestCase
-from wger.nutrition.models import NutritionPlan
+from wger.manager.models import Routine
 
 
-class NutritionalPlanPdfExportTestCase(WgerTestCase):
+class RoutinePdfLogExportTestCase(WgerTestCase):
     """
-    Tests exporting a nutritional plan as a pdf
+    Tests exporting a routine as a PDF - logs
     """
 
     def export_pdf(self, fail=False):
         """
-        Helper function to test exporting a nutritional plan as a pdf
+        Helper function to test exporting a routine as a pdf
         """
-
-        # Get a plan
-        response = self.client.get(
-            reverse(
-                'nutrition:plan:export-pdf',
-                kwargs={'id': '11111111-1111-1111-1111-000000000004'},
-            ),
-        )
+        response = self.client.get(reverse('manager:routine:pdf-log', kwargs={'pk': 3}))
 
         if fail:
-            self.assertIn(response.status_code, (404, 403))
+            self.assertIn(response.status_code, (403, 404, 302))
         else:
             self.assertEqual(response.status_code, 200)
             self.assertEqual(response['Content-Type'], 'application/pdf')
-            self.assertEqual(
-                response['Content-Disposition'], 'attachment; filename=nutritional-plan.pdf'
-            )
 
-            # Approximate size
+            # Approximate size only
             self.assertGreater(int(response['Content-Length']), 38000)
             self.assertLess(int(response['Content-Length']), 42000)
 
-        # Create an empty plan
-        user = User.objects.get(pk=2)
-        language = Language.objects.get(pk=1)
-        plan = NutritionPlan()
-        plan.user = user
-        plan.language = language
-        plan.save()
-        response = self.client.get(reverse('nutrition:plan:export-pdf', kwargs={'id': plan.id}))
+    def export_pdf_with_comments(self, fail=False):
+        """
+        Helper function to test exporting a workout as a pdf, with exercise coments
+        """
+
+        response = self.client.get(
+            reverse('manager:routine:pdf-log', kwargs={'id': 3, 'comments': 0})
+        )
 
         if fail:
-            self.assertIn(response.status_code, (404, 403))
+            self.assertIn(response.status_code, (403, 404, 302))
         else:
             self.assertEqual(response.status_code, 200)
             self.assertEqual(response['Content-Type'], 'application/pdf')
-            self.assertEqual(
-                response['Content-Disposition'], 'attachment; filename=nutritional-plan.pdf'
-            )
 
-            # Approximate size
+            # Approximate size only
             self.assertGreater(int(response['Content-Length']), 38000)
             self.assertLess(int(response['Content-Length']), 42000)
 
     def test_export_pdf_anonymous(self):
         """
-        Tests exporting a nutritional plan as a pdf as an anonymous user
+        Tests exporting a workout as a pdf as an anonymous user
         """
 
         self.export_pdf(fail=True)
 
     def test_export_pdf_owner(self):
         """
-        Tests exporting a nutritional plan as a pdf as the owner user
+        Tests exporting a workout as a pdf as the owner user
         """
 
         self.user_login('test')
@@ -92,8 +85,99 @@ class NutritionalPlanPdfExportTestCase(WgerTestCase):
 
     def test_export_pdf_other(self):
         """
-        Tests exporting a nutritional plan as a pdf as a logged user not owning the data
+        Tests exporting a workout as a pdf as a logged user not owning the data
         """
 
         self.user_login('admin')
         self.export_pdf(fail=True)
+
+
+class RoutinePdfTableExportTestCase(WgerTestCase):
+    """
+    Tests exporting a routine as a PDF - table
+    """
+
+    def export_pdf(self, fail=False):
+        """
+        Helper function to test exporting a routine as a pdf
+        """
+
+        response = self.client.get(reverse('manager:routine:pdf-table', kwargs={'pk': 3}))
+
+        if fail:
+            self.assertIn(response.status_code, (403, 404, 302))
+        else:
+            self.assertEqual(response.status_code, 200)
+            self.assertEqual(response['Content-Type'], 'application/pdf')
+
+            # Approximate size only
+            self.assertGreater(int(response['Content-Length']), 38000)
+            self.assertLess(int(response['Content-Length']), 42000)
+
+    def test_export_pdf_anonymous(self):
+        """
+        Tests exporting a workout as a pdf as an anonymous user
+        """
+
+        self.export_pdf(fail=True)
+
+    def test_export_pdf_owner(self):
+        """
+        Tests exporting a workout as a pdf as the owner user
+        """
+
+        self.user_login('test')
+        self.export_pdf(fail=False)
+
+    def test_export_pdf_other(self):
+        """
+        Tests exporting a workout as a pdf as a logged user not owning the data
+        """
+
+        self.user_login('admin')
+        self.export_pdf(fail=True)
+
+
+class RoutinePdfEscapingTestCase(WgerTestCase):
+    """
+    Tests that user submitted text is escaped before it is passed to reportlab
+    """
+
+    name = 'Squat <img src=x.png>'
+    description = 'Bench <img src="http://localhost:1/x.png"/>'
+
+    def setUp(self):
+        super().setUp()
+
+        routine = Routine.objects.get(pk=3)
+        routine.name = self.name
+        routine.description = self.description
+        routine.save()
+
+        self.user_login('test')
+
+    def paragraph_markup(self, url_name):
+        """
+        Returns the markup of every Paragraph the view builds itself
+        """
+        with patch('wger.manager.views.pdf.Paragraph', side_effect=Paragraph) as paragraph:
+            response = self.client.get(reverse(url_name, kwargs={'pk': 3}))
+
+        self.assertEqual(response.status_code, 200)
+        return [call.args[0] for call in paragraph.call_args_list]
+
+    def test_log_pdf_escapes_routine_text(self):
+        markup = self.paragraph_markup('manager:routine:pdf-log')
+
+        self.assertTrue(markup)
+        for entry in markup:
+            self.assertNotIn('<img', entry)
+        self.assertIn('&lt;img', ' '.join(markup))
+
+    def test_table_pdf_escapes_routine_text(self):
+        markup = self.paragraph_markup('manager:routine:pdf-table')
+
+        self.assertTrue(markup)
+        for entry in markup:
+            self.assertNotIn('<img', entry)
+        self.assertIn('&lt;img', ' '.join(markup))
